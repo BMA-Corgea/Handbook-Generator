@@ -1,22 +1,30 @@
-"""FastAPI app entrypoint.
-
-Wires up:
-- /api/upload    (PDF ingestion)
-- /api/chat      (RAG chat)
-- /api/handbook  (LongWriter orchestration)
-"""
-
 from fastapi import FastAPI
-from server.api.upload import router as upload_router
-from server.api.chat import router as chat_router
-from server.api.handbook import router as handbook_router
+import os
+import httpx
 
-app = FastAPI(title="LunarTech Handbook Generator", version="0.1.0")
+app = FastAPI()
 
-app.include_router(upload_router, prefix="/api", tags=["upload"])
-app.include_router(chat_router, prefix="/api", tags=["chat"])
-app.include_router(handbook_router, prefix="/api", tags=["handbook"])
+GROK_API_KEY = os.getenv("GROK_API_KEY")
+GROK_BASE_URL = os.getenv("GROK_BASE_URL")
+GROK_MODEL = os.getenv("GROK_MODEL", "grok-4.1")
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+@app.get("/test-grok")
+async def test_grok():
+    headers = {"Authorization": f"Bearer {GROK_API_KEY}"}
+    payload = {
+        "model": GROK_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Say hello in 5 words."}
+        ],
+        "max_tokens": 50
+    }
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{GROK_BASE_URL}/chat/completions",
+            json=payload,
+            headers=headers
+        )
+        r.raise_for_status()
+        return r.json()
