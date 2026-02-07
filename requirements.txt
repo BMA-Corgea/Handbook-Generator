@@ -22,7 +22,7 @@ streamlit==1.41.1
 # -----------------------------
 # Supabase / Postgres (required for assignment storage)
 # -----------------------------
-supabase==2.10.0
+supabase
 asyncpg
 pgvector==0.2.5
 

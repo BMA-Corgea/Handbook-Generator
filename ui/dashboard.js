@@ -13,42 +13,45 @@ export default function Dashboard() {
     return DEFAULT_API_BASE.replace(/\/+$/, "");
   }, []);
 
-  // --- Vector dump state (left panel) ---
+  // --- Supabase sync state (left panel) ---
   const [raw, setRaw] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
-  // simple controls (keep it minimal)
-  const [chunkChars, setChunkChars] = useState(2500);
-  const [overlapChars, setOverlapChars] = useState(250);
-  const [includeText, setIncludeText] = useState(false); // default false for vectors
+  const [batchSize, setBatchSize] = useState(200);
+  const [storeDocText, setStoreDocText] = useState(true);
 
-    async function dumpVectors() {
-    setLoading(true);
-    setErr("");
-    setRaw("");
+    async function syncToSupabase() {
+      setLoading(true);
+      setErr("");
+      setRaw("");
 
-    try {
-        const res = await fetch(`${apiBase}/lightrag/ingest-local-pdfs?pdf_dir=.`, {
-        method: "GET",
-        headers: { Accept: "application/json" },
+      try {
+        const qs = new URLSearchParams({
+          batch_size: String(batchSize || 200),
+          store_doc_text: storeDocText ? "true" : "false",
+        });
+
+        const res = await fetch(`${apiBase}/lightrag/sync-to-supabase?${qs.toString()}`, {
+          method: "POST",
+          headers: { Accept: "application/json" },
         });
 
         const text = await res.text();
 
         try {
-        const parsed = JSON.parse(text);
-        if (!res.ok) throw new Error(parsed?.detail || parsed?.error || `HTTP ${res.status}`);
-        setRaw(JSON.stringify(parsed, null, 2));
+          const parsed = JSON.parse(text);
+          if (!res.ok) throw new Error(parsed?.detail || parsed?.error || `HTTP ${res.status}`);
+          setRaw(JSON.stringify(parsed, null, 2));
         } catch (e) {
-        if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
-        setRaw(text);
+          if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
+          setRaw(text);
         }
-    } catch (e) {
+      } catch (e) {
         setErr(e?.message || String(e));
-    } finally {
+      } finally {
         setLoading(false);
-    }
+      }
     }
 
   // --- Chat state (right panel) ---
@@ -307,72 +310,57 @@ export default function Dashboard() {
       "div",
       { style: styles.grid },
 
-      // ----- LEFT: Vector dump -----
       React.createElement(
         "div",
-        { style: styles.card },
-
+        { style: styles.headerRow },
         React.createElement(
           "div",
-          { style: styles.headerRow },
+          null,
+          React.createElement("div", { style: styles.title }, "LightRAG → Supabase Sync"),
           React.createElement(
             "div",
-            null,
-            React.createElement("div", { style: styles.title }, "PDF → Vector JSON Dump"),
-            React.createElement(
-              "div",
-              { style: styles.subtitle },
-              "Calls ",
-              React.createElement("span", { style: styles.code }, "GET /lightrag/dump-pdf-vectors"),
-              " and prints the JSON output."
-            )
-          ),
-          React.createElement("div", { style: styles.badge }, apiBase)
+            { style: styles.subtitle },
+            "Calls ",
+            React.createElement("span", { style: styles.code }, "POST /lightrag/sync-to-supabase"),
+            " and writes documents + chunks + embeddings into Supabase (pgvector)."
+          )
+        ),
+        React.createElement("div", { style: styles.badge }, apiBase)
+      ),
+
+      React.createElement(
+        "div",
+        { style: styles.actions },
+
+        React.createElement("input", {
+          style: styles.input,
+          placeholder: "batch_size",
+          value: batchSize,
+          type: "number",
+          min: 1,
+          max: 1000,
+          step: 50,
+          onChange: (e) => setBatchSize(Number(e.target.value || 200)),
+          title: "batch_size",
+        }),
+
+        React.createElement(
+          "label",
+          { style: styles.checkboxRow, title: "Store full document text in documents.content (recommended for re-chunking later)" },
+          React.createElement("input", {
+            type: "checkbox",
+            checked: storeDocText,
+            onChange: (e) => setStoreDocText(!!e.target.checked),
+          }),
+          "store_doc_text"
         ),
 
         React.createElement(
-          "div",
-          { style: styles.actions },
-
-          React.createElement("input", {
-            style: styles.input,
-            value: chunkChars,
-            type: "number",
-            min: 200,
-            max: 20000,
-            step: 100,
-            onChange: (e) => setChunkChars(Number(e.target.value || 2500)),
-            title: "chunk_chars",
-          }),
-
-          React.createElement("input", {
-            style: styles.input,
-            value: overlapChars,
-            type: "number",
-            min: 0,
-            max: 5000,
-            step: 50,
-            onChange: (e) => setOverlapChars(Number(e.target.value || 250)),
-            title: "overlap_chars",
-          }),
-
-          React.createElement(
-            "label",
-            { style: styles.checkboxRow, title: "Include chunk text in JSON (can be huge)" },
-            React.createElement("input", {
-              type: "checkbox",
-              checked: includeText,
-              onChange: (e) => setIncludeText(!!e.target.checked),
-            }),
-            "include_text"
-          ),
-
-          React.createElement(
-            "button",
-            { style: styles.button, onClick: dumpVectors, disabled: loading },
-            loading ? "Running…" : "Dump Vectors → outputs/ JSON"
-          )
-        ),
+          "button",
+          { style: styles.button, onClick: syncToSupabase, disabled: loading },
+          loading ? "Syncing…" : "Sync LightRAG → Supabase"
+        )
+      ),
 
         err
           ? React.createElement(
@@ -456,5 +444,4 @@ export default function Dashboard() {
         )
       )
     )
-  );
 }
