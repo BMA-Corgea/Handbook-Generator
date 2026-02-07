@@ -9,6 +9,7 @@ from server.routers.ingest_service import router as ingest_router
 from server.routers.grok_router import router as grok_router
 from server.routers.lightrag_service import router as lightrag_router
 from server.routers.supabase_router import router as supabase_router
+from server.routers.dashboard_router import router as dashboard_router
 
 load_dotenv()
 
@@ -26,6 +27,7 @@ app.include_router(ingest_router)
 app.include_router(grok_router)
 app.include_router(lightrag_router)
 app.include_router(supabase_router)
+app.include_router(dashboard_router)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 UI_DIR = PROJECT_ROOT / "ui"

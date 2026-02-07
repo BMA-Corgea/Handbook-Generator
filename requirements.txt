@@ -42,3 +42,4 @@ python-multipart
 # -----------------------------
 # Recommended Python: 3.12
 # Python 3.13 may require Rust toolchain for tiktoken
+# supabase needed to have the latest version to work with their newer API keys
