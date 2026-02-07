@@ -24,7 +24,6 @@ Thumbs.db
 .streamlit/
 
 # Outputs
-outputs/
-lightrag_cache/
+lightrag_cache/*
 
 *.pdf

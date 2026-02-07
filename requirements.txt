@@ -38,6 +38,12 @@ lightrag-hku
 python-multipart
 
 # -----------------------------
+# Testing
+# -----------------------------
+pytest
+fastapi
+
+# -----------------------------
 # Notes
 # -----------------------------
 # Recommended Python: 3.12
