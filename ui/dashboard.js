@@ -13,38 +13,43 @@ export default function Dashboard() {
     return DEFAULT_API_BASE.replace(/\/+$/, "");
   }, []);
 
-  // --- PDF dump state (left panel) ---
+  // --- Vector dump state (left panel) ---
   const [raw, setRaw] = useState("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
-  async function dumpPdfs() {
+  // simple controls (keep it minimal)
+  const [chunkChars, setChunkChars] = useState(2500);
+  const [overlapChars, setOverlapChars] = useState(250);
+  const [includeText, setIncludeText] = useState(false); // default false for vectors
+
+    async function dumpVectors() {
     setLoading(true);
     setErr("");
     setRaw("");
 
     try {
-      const res = await fetch(`${apiBase}/lightrag/dump-pdf-json`, {
+        const res = await fetch(`${apiBase}/lightrag/ingest-local-pdfs?pdf_dir=.`, {
         method: "GET",
         headers: { Accept: "application/json" },
-      });
+        });
 
-      const text = await res.text();
+        const text = await res.text();
 
-      try {
+        try {
         const parsed = JSON.parse(text);
         if (!res.ok) throw new Error(parsed?.detail || parsed?.error || `HTTP ${res.status}`);
         setRaw(JSON.stringify(parsed, null, 2));
-      } catch (e) {
+        } catch (e) {
         if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
         setRaw(text);
-      }
+        }
     } catch (e) {
-      setErr(e?.message || String(e));
+        setErr(e?.message || String(e));
     } finally {
-      setLoading(false);
+        setLoading(false);
     }
-  }
+    }
 
   // --- Chat state (right panel) ---
   const [chatInput, setChatInput] = useState("");
@@ -64,7 +69,6 @@ export default function Dashboard() {
   const chatScrollRef = useRef(null);
 
   useEffect(() => {
-    // Auto-scroll to bottom on new messages
     const el = chatScrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
@@ -81,13 +85,10 @@ export default function Dashboard() {
     setChatError("");
     setChatSending(true);
 
-    // User bubble (right)
     pushMessage("user", text);
     setChatInput("");
 
     try {
-      // For now: call the fixed smoke test endpoint.
-      // Next step: create POST /grok/chat that accepts the user text.
       const res = await fetch(`${apiBase}/grok/test_grok`, {
         method: "GET",
         headers: { Accept: "application/json" },
@@ -106,7 +107,6 @@ export default function Dashboard() {
         throw new Error(msg);
       }
 
-      // Assistant bubble (left)
       const reply = parsed?.response ?? "(No response field)";
       pushMessage("assistant", reply);
     } catch (e) {
@@ -135,7 +135,6 @@ export default function Dashboard() {
         'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial',
     },
 
-    // --- Layout ---
     grid: {
       display: "grid",
       gridTemplateColumns: "1.1fr 0.9fr",
@@ -186,6 +185,19 @@ export default function Dashboard() {
       fontWeight: 700,
     },
 
+    input: {
+      padding: "10px 12px",
+      borderRadius: 12,
+      border: "1px solid rgba(255,255,255,0.12)",
+      background: "rgba(0,0,0,0.28)",
+      color: "#e6edf3",
+      outline: "none",
+      fontSize: 13,
+      width: 140,
+    },
+
+    checkboxRow: { display: "flex", alignItems: "center", gap: 8, opacity: 0.9 },
+
     errorBox: {
       marginTop: 14,
       padding: 14,
@@ -208,8 +220,6 @@ export default function Dashboard() {
       overflowY: "auto",
     },
 
-    hint: { marginTop: 8, opacity: 0.75, fontSize: 13 },
-
     code: {
       padding: "2px 6px",
       borderRadius: 8,
@@ -219,13 +229,7 @@ export default function Dashboard() {
     },
 
     // --- Chat UI ---
-    chatShell: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 12,
-      height: 640,
-    },
-
+    chatShell: { display: "flex", flexDirection: "column", gap: 12, height: 640 },
     chatLog: {
       flex: 1,
       borderRadius: 12,
@@ -234,12 +238,7 @@ export default function Dashboard() {
       padding: 12,
       overflowY: "auto",
     },
-
-    bubbleRow: {
-      display: "flex",
-      marginBottom: 10,
-    },
-
+    bubbleRow: { display: "flex", marginBottom: 10 },
     bubble: {
       maxWidth: "80%",
       padding: "10px 12px",
@@ -251,18 +250,12 @@ export default function Dashboard() {
       whiteSpace: "pre-wrap",
       wordBreak: "break-word",
     },
-
     bubbleUser: {
       marginLeft: "auto",
       background: "rgba(80, 160, 255, 0.14)",
       border: "1px solid rgba(80, 160, 255, 0.25)",
     },
-
-    bubbleAssistant: {
-      marginRight: "auto",
-      background: "rgba(255,255,255,0.06)",
-    },
-
+    bubbleAssistant: { marginRight: "auto", background: "rgba(255,255,255,0.06)" },
     bubbleSystem: {
       marginLeft: "auto",
       marginRight: "auto",
@@ -271,13 +264,7 @@ export default function Dashboard() {
       border: "1px solid rgba(255, 210, 120, 0.22)",
       maxWidth: "92%",
     },
-
-    composer: {
-      display: "flex",
-      gap: 10,
-      alignItems: "flex-end",
-    },
-
+    composer: { display: "flex", gap: 10, alignItems: "flex-end" },
     textarea: {
       flex: 1,
       minHeight: 44,
@@ -292,7 +279,6 @@ export default function Dashboard() {
       fontSize: 13,
       lineHeight: 1.3,
     },
-
     smallNote: { opacity: 0.75, fontSize: 12, marginTop: 8 },
   };
 
@@ -304,10 +290,7 @@ export default function Dashboard() {
     if (m.role === "assistant") Object.assign(bubbleStyle, styles.bubbleAssistant);
     if (m.role === "system") Object.assign(bubbleStyle, styles.bubbleSystem);
 
-    // align system center
-    if (m.role === "system") {
-      rowStyle.justifyContent = "center";
-    }
+    if (m.role === "system") rowStyle.justifyContent = "center";
 
     return React.createElement(
       "div",
@@ -324,7 +307,7 @@ export default function Dashboard() {
       "div",
       { style: styles.grid },
 
-      // ----- LEFT: PDF dump -----
+      // ----- LEFT: Vector dump -----
       React.createElement(
         "div",
         { style: styles.card },
@@ -335,12 +318,12 @@ export default function Dashboard() {
           React.createElement(
             "div",
             null,
-            React.createElement("div", { style: styles.title }, "PDF → JSON Dump"),
+            React.createElement("div", { style: styles.title }, "PDF → Vector JSON Dump"),
             React.createElement(
               "div",
               { style: styles.subtitle },
               "Calls ",
-              React.createElement("span", { style: styles.code }, "GET /lightrag/dump-pdf-json"),
+              React.createElement("span", { style: styles.code }, "GET /lightrag/dump-pdf-vectors"),
               " and prints the JSON output."
             )
           ),
@@ -350,10 +333,44 @@ export default function Dashboard() {
         React.createElement(
           "div",
           { style: styles.actions },
+
+          React.createElement("input", {
+            style: styles.input,
+            value: chunkChars,
+            type: "number",
+            min: 200,
+            max: 20000,
+            step: 100,
+            onChange: (e) => setChunkChars(Number(e.target.value || 2500)),
+            title: "chunk_chars",
+          }),
+
+          React.createElement("input", {
+            style: styles.input,
+            value: overlapChars,
+            type: "number",
+            min: 0,
+            max: 5000,
+            step: 50,
+            onChange: (e) => setOverlapChars(Number(e.target.value || 250)),
+            title: "overlap_chars",
+          }),
+
+          React.createElement(
+            "label",
+            { style: styles.checkboxRow, title: "Include chunk text in JSON (can be huge)" },
+            React.createElement("input", {
+              type: "checkbox",
+              checked: includeText,
+              onChange: (e) => setIncludeText(!!e.target.checked),
+            }),
+            "include_text"
+          ),
+
           React.createElement(
             "button",
-            { style: styles.button, onClick: dumpPdfs, disabled: loading },
-            loading ? "Running…" : "Dump PDFs → outputs/ JSON"
+            { style: styles.button, onClick: dumpVectors, disabled: loading },
+            loading ? "Running…" : "Dump Vectors → outputs/ JSON"
           )
         ),
 

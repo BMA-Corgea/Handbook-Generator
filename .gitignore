@@ -25,5 +25,6 @@ Thumbs.db
 
 # Outputs
 outputs/
+lightrag_cache/
 
 *.pdf
