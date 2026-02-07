@@ -264,7 +264,8 @@ def _lightrag_root_dir() -> Path:
 
 
 def _pdf_imports_dir() -> Path:
-    d = Path("./pdf_imports")
+    # Fix: Respect env var so tests can isolate file system
+    d = Path(os.getenv("PDF_IMPORTS_DIR", "./pdf_imports"))
     d.mkdir(parents=True, exist_ok=True)
     return d
 
