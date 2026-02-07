@@ -7,7 +7,6 @@ This file owns:
 
 For now we implement two "milestone" endpoints:
 1) /pdf-stats   -> read local PDFs from ./lunar-reader and return word counts
-2) /test-grok   -> sanity-check Grok API connectivity
 
 Later, this same module can expand to real ingestion:
 - upload PDF

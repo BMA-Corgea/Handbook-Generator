@@ -14,3 +14,5 @@ streamlit==1.41.1
 # Optional helpers (uncomment when you implement)
 # supabase==2.10.0
 # tiktoken==0.7.0
+
+lightrag-hku[api]
