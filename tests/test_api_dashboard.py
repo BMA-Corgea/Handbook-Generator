@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 # Import your FastAPI app
 from server.main import app
 
+import server.routers.supabase_router as supabase_router_mod
 
 # -----------------------------
 # Fixtures
@@ -230,3 +231,250 @@ def test_supabase_sync_lightrag_missing_artifacts_returns_500(client: TestClient
     assert r.status_code == 500
     detail = r.json().get("detail", "")
     assert "Missing file" in detail
+
+# -----------------------------
+# Fakes for new endpoints (documents + RPC)
+# -----------------------------
+class _FakeResponse:
+    def __init__(self, data: Any):
+        self.data = data
+
+
+class _FakeRpcCall:
+    """
+    supabase-py pattern: sb.rpc(...).execute()
+    """
+    def __init__(self, rows: List[Dict[str, Any]]):
+        self._rows = rows
+
+    def execute(self):
+        return _FakeResponse(self._rows)
+
+
+class _FakeTableQuery:
+    def __init__(self, table_name: str, fake_db: Dict[str, List[Dict[str, Any]]]):
+        self._table_name = table_name
+        self._db = fake_db
+        self._eq_filters: Dict[str, Any] = {}
+        self._limit: Optional[int] = None
+        self._range: Optional[tuple[int, int]] = None
+        self._order_col: Optional[str] = None
+        self._order_desc: bool = False
+
+    def select(self, _cols: str):
+        return self
+
+    def order(self, col: str, desc: bool = False):
+        self._order_col = col
+        self._order_desc = bool(desc)
+        return self
+
+    def range(self, start: int, end: int):
+        self._range = (int(start), int(end))
+        return self
+
+    def eq(self, col: str, value: Any):
+        self._eq_filters[col] = value
+        return self
+
+    def limit(self, n: int):
+        self._limit = int(n)
+        return self
+
+    def execute(self):
+        rows = list(self._db.get(self._table_name, []))
+
+        # apply eq filters
+        for k, v in self._eq_filters.items():
+            rows = [r for r in rows if r.get(k) == v]
+
+        # apply order
+        if self._order_col:
+            rows.sort(key=lambda r: (r.get(self._order_col) is None, r.get(self._order_col)))
+            if self._order_desc:
+                rows.reverse()
+
+        # apply range
+        if self._range:
+            s, e = self._range
+            rows = rows[s : e + 1]
+
+        # apply limit
+        if self._limit is not None:
+            rows = rows[: self._limit]
+
+        return _FakeResponse(rows)
+
+
+class _FakeSupabaseClient:
+    def __init__(self, fake_db: Dict[str, List[Dict[str, Any]]], rpc_rows: List[Dict[str, Any]]):
+        self._db = fake_db
+        self._rpc_rows = rpc_rows
+        self._rpc_calls: List[tuple[str, Dict[str, Any]]] = []
+
+    def table(self, name: str):
+        return _FakeTableQuery(name, self._db)
+
+    def rpc(self, fn_name: str, payload: Dict[str, Any]):
+        self._rpc_calls.append((fn_name, payload))
+        return _FakeRpcCall(self._rpc_rows)
+
+    @property
+    def rpc_calls(self):
+        return list(self._rpc_calls)
+
+
+@pytest.fixture
+def fake_supabase(monkeypatch):
+    # minimal documents data
+    fake_db = {
+        "documents": [
+            {
+                "doc_id": "doc_1",
+                "file_path": "pdf_imports/a.pdf",
+                "created_at": "2026-02-01T00:00:00Z",
+                "updated_at": "2026-02-01T00:00:00Z",
+                "metadata": {"source": "pdf_imports/a.pdf"},
+                "content": "FULL DOC (optional)",
+            },
+            {
+                "doc_id": "doc_2",
+                "file_path": "pdf_imports/b.pdf",
+                "created_at": "2026-02-02T00:00:00Z",
+                "updated_at": "2026-02-02T00:00:00Z",
+                "metadata": {"source": "pdf_imports/b.pdf"},
+                "content": "FULL DOC (optional)",
+            },
+        ]
+    }
+
+    # rows returned by match_chunks/match_chunks_multi
+    rpc_rows = [
+        {
+            "chunk_id": "chunk_1",
+            "doc_id": "doc_1",
+            "chunk_order_index": 0,
+            "file_path": "pdf_imports/a.pdf",
+            "content": "Chunk content 1",
+            "similarity": 0.88,
+            "metadata": {"page": 1},
+        },
+        {
+            "chunk_id": "chunk_2",
+            "doc_id": "doc_1",
+            "chunk_order_index": 1,
+            "file_path": "pdf_imports/a.pdf",
+            "content": "Chunk content 2",
+            "similarity": 0.84,
+            "metadata": {"page": 2},
+        },
+    ]
+
+    sb = _FakeSupabaseClient(fake_db=fake_db, rpc_rows=rpc_rows)
+
+    # Patch supabase client getter to return our fake
+    monkeypatch.setattr(supabase_router_mod, "_get_supabase_client", lambda: sb)
+
+    # Patch embeddings to avoid network
+    async def _fake_embed_query(_text: str) -> List[float]:
+        return [0.0, 0.1, 0.2]
+
+    monkeypatch.setattr(supabase_router_mod, "_embed_query", _fake_embed_query)
+
+    return sb
+
+
+# -----------------------------
+# New endpoint tests
+# -----------------------------
+def test_supabase_list_documents_ok(client: TestClient, fake_supabase: _FakeSupabaseClient) -> None:
+    r = client.get("/supabase/documents")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["count"] == 2
+    assert isinstance(body["documents"], list)
+    assert {d["doc_id"] for d in body["documents"]} == {"doc_1", "doc_2"}
+
+
+def test_supabase_get_document_ok(client: TestClient, fake_supabase: _FakeSupabaseClient) -> None:
+    r = client.get("/supabase/documents/doc_1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["document"]["doc_id"] == "doc_1"
+    assert "file_path" in body["document"]
+
+
+def test_supabase_get_document_404(client: TestClient, fake_supabase: _FakeSupabaseClient) -> None:
+    r = client.get("/supabase/documents/does_not_exist")
+    assert r.status_code == 404
+    detail = r.json().get("detail", "")
+    assert "Document not found" in detail
+
+
+def test_supabase_retrieve_ok_calls_rpc(client: TestClient, fake_supabase: _FakeSupabaseClient) -> None:
+    payload = {"doc_id": "doc_1", "query": "What is this about?", "top_k": 2}
+    r = client.post("/supabase/retrieve", json=payload)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["doc_id"] == "doc_1"
+    assert body["top_k"] == 2
+    assert isinstance(body["chunks"], list)
+    assert len(body["chunks"]) == 2
+
+    # Ensure RPC was called with expected function + keys
+    calls = fake_supabase.rpc_calls
+    assert len(calls) == 1
+    fn_name, rpc_payload = calls[0]
+    assert fn_name == "match_chunks"
+    assert rpc_payload["match_doc_id"] == "doc_1"
+    assert rpc_payload["match_count"] == 2
+    assert isinstance(rpc_payload["query_embedding"], list)
+
+
+def test_supabase_retrieve_rejects_empty_query(client: TestClient, fake_supabase: _FakeSupabaseClient) -> None:
+    payload = {"doc_id": "doc_1", "query": "   ", "top_k": 3}
+    r = client.post("/supabase/retrieve", json=payload)
+    assert r.status_code == 400
+    assert "Query cannot be empty" in (r.json().get("detail") or "")
+
+
+def test_supabase_retrieve_passes_min_similarity_when_set(client: TestClient, fake_supabase: _FakeSupabaseClient) -> None:
+    payload = {"doc_id": "doc_1", "query": "test", "top_k": 5, "min_similarity": 0.77}
+    r = client.post("/supabase/retrieve", json=payload)
+    assert r.status_code == 200
+
+    calls = fake_supabase.rpc_calls
+    assert len(calls) == 1
+    fn_name, rpc_payload = calls[0]
+    assert fn_name == "match_chunks"
+    assert "min_similarity" in rpc_payload
+    assert float(rpc_payload["min_similarity"]) == 0.77
+
+
+def test_supabase_retrieve_multi_ok_calls_rpc(client: TestClient, fake_supabase: _FakeSupabaseClient) -> None:
+    payload = {"doc_ids": ["doc_1", "doc_2"], "query": "hello", "top_k": 4}
+    r = client.post("/supabase/retrieve-multi", json=payload)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["doc_ids"] == ["doc_1", "doc_2"]
+    assert body["top_k"] == 4
+    assert isinstance(body["chunks"], list)
+
+    calls = fake_supabase.rpc_calls
+    assert len(calls) == 1
+    fn_name, rpc_payload = calls[0]
+    assert fn_name == "match_chunks_multi"
+    assert rpc_payload["match_doc_ids"] == ["doc_1", "doc_2"]
+    assert rpc_payload["match_count"] == 4
+    assert isinstance(rpc_payload["query_embedding"], list)
+
+
+def test_supabase_retrieve_multi_rejects_empty_query(client: TestClient, fake_supabase: _FakeSupabaseClient) -> None:
+    # NOTE: Your actual response is 422 (schema validation) per your test output.
+    payload = {"doc_ids": ["doc_1"], "query": "", "top_k": 4}
+    r = client.post("/supabase/retrieve-multi", json=payload)
+    assert r.status_code == 422

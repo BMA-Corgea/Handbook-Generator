@@ -1,24 +1,32 @@
 """
-lightrag_service.py - WORKING VERSION (modular)
+lightrag_service.py - UPDATED for per-PDF digestion + selectable Supabase upload
 
-- LightRAG ingestion + query endpoints live here.
-- Supabase persistence is delegated to supabase_router.py (keeps file size sane).
+Matches the new dashboard flow:
 
-OpenAI-compatible providers are used for:
-- LLM entity extraction (LLM_* env vars)
-- Embeddings (EMBEDDINGS_* env vars)
+1) /dashboard/upload-pdf stages PDFs into ./pdf_imports/ (handled elsewhere)
+2) UI clicks "! Digest" per row -> POST /lightrag/ingest-staged
+   - Reads ./pdf_imports/<saved_name>
+   - Extracts text
+   - Creates per-doc working dir: ./lightrag_cache/<doc_key>/
+   - Builds LightRAG artifacts in that folder
+3) UI selects a digested doc -> POST /lightrag/sync-to-supabase?working_dir=...
 
-Grok is NOT used in this file.
+Notes:
+- Keeps Supabase logic delegated to supabase_router.sync_lightrag_artifacts_to_supabase
+- Does NOT change your /query endpoint; it still uses the *default* working_dir instance.
+  (For the assignment, you're using Supabase retrieval for chat anyway.)
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File
+from pydantic import BaseModel
 from dotenv import load_dotenv
 from pathlib import Path
 from typing import Any
 import json
 import os
+import re
 from datetime import datetime
 
 # Local module: keep Supabase plumbing elsewhere
@@ -37,8 +45,11 @@ load_dotenv()
 
 router = APIRouter(prefix="/lightrag", tags=["lightrag"])
 
-# Global LightRAG instance
+# Global LightRAG instance (default working_dir)
 _lightrag_instance: LightRAG | None = None
+
+# Per-working-dir LightRAG instances for digestion
+_lightrag_instances_by_dir: dict[str, LightRAG] = {}
 
 
 # -----------------------------
@@ -145,22 +156,29 @@ def _get_embedding_dim() -> int:
     return dim_map.get(model, 1536)
 
 
-async def _get_lightrag() -> LightRAG:
-    if not LIGHTRAG_AVAILABLE:
-        raise HTTPException(status_code=500, detail="LightRAG not installed. Run: pip install lightrag-hku")
-
-    global _lightrag_instance
-    if _lightrag_instance is not None:
-        return _lightrag_instance
-
-    working_dir = os.getenv("LIGHTRAG_WORKING_DIR", "./lightrag_cache")
-
+def _require_keys() -> None:
     llm_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
     embed_key = os.getenv("EMBEDDINGS_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not llm_key:
         raise HTTPException(status_code=500, detail="Missing LLM_API_KEY (or OPENAI_API_KEY) in .env")
     if not embed_key:
         raise HTTPException(status_code=500, detail="Missing EMBEDDINGS_API_KEY (or OPENAI_API_KEY) in .env")
+
+
+async def _get_lightrag_default() -> LightRAG:
+    """
+    Default instance used by /query and /status (legacy behavior).
+    """
+    if not LIGHTRAG_AVAILABLE:
+        raise HTTPException(status_code=500, detail="LightRAG not installed. Run: pip install lightrag-hku")
+
+    _require_keys()
+
+    global _lightrag_instance
+    if _lightrag_instance is not None:
+        return _lightrag_instance
+
+    working_dir = os.getenv("LIGHTRAG_WORKING_DIR", "./lightrag_cache")
 
     _lightrag_instance = LightRAG(
         working_dir=working_dir,
@@ -172,9 +190,36 @@ async def _get_lightrag() -> LightRAG:
         ),
     )
 
-    # Initialize storages before first use
     await _lightrag_instance.initialize_storages()
     return _lightrag_instance
+
+
+async def _get_lightrag_for_working_dir(working_dir: Path) -> LightRAG:
+    """
+    Per-doc working_dir instance used by /ingest-staged.
+    """
+    if not LIGHTRAG_AVAILABLE:
+        raise HTTPException(status_code=500, detail="LightRAG not installed. Run: pip install lightrag-hku")
+
+    _require_keys()
+
+    wd = str(working_dir.resolve())
+    existing = _lightrag_instances_by_dir.get(wd)
+    if existing is not None:
+        return existing
+
+    rag = LightRAG(
+        working_dir=wd,
+        llm_model_func=openai_compatible_llm,
+        embedding_func=EmbeddingFunc(
+            embedding_dim=_get_embedding_dim(),
+            max_token_size=8192,
+            func=openai_compatible_embedding,
+        ),
+    )
+    await rag.initialize_storages()
+    _lightrag_instances_by_dir[wd] = rag
+    return rag
 
 
 # -----------------------------
@@ -201,13 +246,113 @@ def _outputs_dir() -> Path:
     return out
 
 
+def _slugify(name: str) -> str:
+    """
+    Turns 'My Shoes.pdf' -> 'my-shoes'
+    """
+    name = (name or "").strip()
+    name = re.sub(r"\.pdf$", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"[^a-zA-Z0-9]+", "-", name).strip("-").lower()
+    return name or f"doc-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+
+def _lightrag_root_dir() -> Path:
+    # root folder that contains per-doc folders
+    root = Path(os.getenv("LIGHTRAG_WORKING_DIR", "./lightrag_cache"))
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _pdf_imports_dir() -> Path:
+    d = Path("./pdf_imports")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# -----------------------------
+# Models
+# -----------------------------
+class IngestStagedRequest(BaseModel):
+    saved_name: str
+    original_name: str | None = None
+    doc_key: str | None = None  # optional override
+
+
 # -----------------------------
 # Routes
 # -----------------------------
+@router.post("/ingest-staged")
+async def ingest_staged(req: IngestStagedRequest) -> dict[str, Any]:
+    """
+    Digest a previously-uploaded PDF from ./pdf_imports/ into its OWN LightRAG folder:
+
+      ./lightrag_cache/<doc_key>/
+
+    This matches the dashboard "(!) Digest" per-row button.
+    """
+    saved = (req.saved_name or "").strip()
+    if not saved:
+        raise HTTPException(status_code=400, detail="saved_name is required")
+
+    pdf_path = _pdf_imports_dir() / saved
+    if not pdf_path.exists():
+        raise HTTPException(status_code=404, detail=f"PDF not found in ./pdf_imports/: {saved}")
+
+    # per-doc folder name
+    doc_key = (req.doc_key or "").strip()
+    if not doc_key:
+        doc_key = _slugify(req.original_name or saved)
+
+    working_dir = _lightrag_root_dir() / doc_key
+    working_dir.mkdir(parents=True, exist_ok=True)
+
+    # extract + insert
+    text = _extract_text_from_pdf(pdf_path)
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="PDF contains no extractable text")
+
+    try:
+        rag = await _get_lightrag_for_working_dir(working_dir)
+        await rag.ainsert(text)
+
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "filename": saved,
+            "original_name": req.original_name or saved,
+            "doc_key": doc_key,
+            "working_dir": str(working_dir),
+            "char_count": len(text),
+            "word_count": len(text.split()),
+            "status": "success",
+        }
+        log_path = _outputs_dir() / "ingestion_log.jsonl"
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry) + "\n")
+
+        return {
+            "ok": True,
+            "saved_name": saved,
+            "original_name": req.original_name or saved,
+            "doc_key": doc_key,
+            "working_dir": str(working_dir),
+            "char_count": len(text),
+            "word_count": len(text.split()),
+            "message": "PDF digested into per-doc LightRAG working_dir",
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error digesting staged PDF: {str(e)}")
+
+
 @router.post("/ingest-pdf")
 async def ingest_pdf(file: UploadFile = File(...), description: str | None = None) -> dict[str, Any]:
     """
-    Upload and ingest a PDF into LightRAG (builds graph + embeddings on disk).
+    Legacy endpoint:
+    Upload and ingest a PDF into *default* LightRAG working_dir (one shared folder).
+    You probably won't use this in the new dashboard, but keeping it doesn't hurt.
     """
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="File must be a PDF")
@@ -224,7 +369,7 @@ async def ingest_pdf(file: UploadFile = File(...), description: str | None = Non
         if not text.strip():
             raise HTTPException(status_code=400, detail="PDF contains no extractable text")
 
-        rag = await _get_lightrag()
+        rag = await _get_lightrag_default()
         await rag.ainsert(text)
 
         log_entry = {
@@ -234,6 +379,7 @@ async def ingest_pdf(file: UploadFile = File(...), description: str | None = Non
             "char_count": len(text),
             "word_count": len(text.split()),
             "status": "success",
+            "mode": "legacy_default_working_dir",
         }
         log_path = _outputs_dir() / "ingestion_log.jsonl"
         with log_path.open("a", encoding="utf-8") as f:
@@ -244,7 +390,7 @@ async def ingest_pdf(file: UploadFile = File(...), description: str | None = Non
             "filename": file.filename,
             "char_count": len(text),
             "word_count": len(text.split()),
-            "message": "PDF ingested into LightRAG working_dir",
+            "message": "PDF ingested into default LightRAG working_dir",
         }
 
     except HTTPException:
@@ -261,7 +407,8 @@ async def ingest_pdf(file: UploadFile = File(...), description: str | None = Non
 @router.get("/ingest-local-pdfs")
 async def ingest_local_pdfs(pdf_dir: str = ".") -> dict[str, Any]:
     """
-    Ingest all PDFs from a local directory into LightRAG.
+    Legacy helper:
+    Ingest all PDFs from a local directory into default LightRAG working_dir.
     """
     pdf_dir_path = Path(pdf_dir)
     if not pdf_dir_path.exists():
@@ -271,7 +418,7 @@ async def ingest_local_pdfs(pdf_dir: str = ".") -> dict[str, Any]:
     if not pdf_files:
         return {"ok": False, "pdf_count": 0, "message": f"No PDF files found in {pdf_dir}"}
 
-    rag = await _get_lightrag()
+    rag = await _get_lightrag_default()
     results: list[dict[str, Any]] = []
 
     for pdf_path in pdf_files:
@@ -309,13 +456,17 @@ async def query_knowledge_graph(
     mode: str = Query(default="hybrid", pattern="^(naive|local|global|hybrid)$"),
 ) -> dict[str, Any]:
     """
-    Query LightRAG’s knowledge graph (still uses on-disk working_dir).
+    Query LightRAG’s knowledge graph (default working_dir instance).
+
+    NOTE:
+    - This is NOT the dashboard chat path.
+    - Dashboard chat uses Supabase vectors via /supabase/retrieve.
     """
     if not query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
     try:
-        rag = await _get_lightrag()
+        rag = await _get_lightrag_default()
         result = await rag.aquery(query, param=QueryParam(mode=mode))
         return {"ok": True, "query": query, "mode": mode, "response": result}
     except ValueError as e:
@@ -331,11 +482,15 @@ def sync_to_supabase(
     store_doc_text: bool = Query(default=True),
 ) -> dict[str, Any]:
     """
-    Phase 1 persistence: store ONLY documents + chunks + chunk embeddings in Supabase (pgvector).
+    Persist documents + chunks + embeddings from ONE LightRAG working dir into Supabase (pgvector).
 
-    Delegates to supabase_router.sync_lightrag_artifacts_to_supabase to keep this file small.
+    In the new dashboard, this is called with working_dir set to:
+      ./lightrag_cache/<doc_key>/
     """
     wd = Path(working_dir or os.getenv("LIGHTRAG_WORKING_DIR", "./lightrag_cache"))
+    if not wd.exists():
+        raise HTTPException(status_code=404, detail=f"working_dir not found: {str(wd)}")
+
     return sync_lightrag_artifacts_to_supabase(
         working_dir=wd,
         batch_size=batch_size,
@@ -344,25 +499,33 @@ def sync_to_supabase(
 
 
 @router.get("/status")
-async def get_status() -> dict[str, Any]:
+async def get_status(working_dir: str | None = None) -> dict[str, Any]:
     """
-    Quick visibility into whether LightRAG has built artifacts in working_dir.
+    Visibility into whether LightRAG has built artifacts in a working_dir.
+
+    - If working_dir is provided, checks that folder (no LightRAG init required).
+    - Otherwise checks default LightRAG working_dir (and reports config).
     """
     try:
-        rag = await _get_lightrag()
-        working_dir = Path(rag.working_dir)
-
         files_to_check = [
             "graph_chunk_entity_relation.graphml",
             "vdb_chunks.json",
             "kv_store_full_docs.json",
             "kv_store_text_chunks.json",
         ]
-        file_status = {f: (working_dir / f).exists() for f in files_to_check}
+
+        if working_dir:
+            wd = Path(working_dir)
+            file_status = {f: (wd / f).exists() for f in files_to_check}
+            return {"ok": True, "working_dir": str(wd.resolve()), "files": file_status}
+
+        rag = await _get_lightrag_default()
+        wd = Path(rag.working_dir)
+        file_status = {f: (wd / f).exists() for f in files_to_check}
 
         return {
             "ok": True,
-            "working_dir": str(working_dir),
+            "working_dir": str(wd.resolve()),
             "files": file_status,
             "config": {
                 "llm_model": os.getenv("LLM_MODEL", "gpt-4o-mini"),
@@ -375,21 +538,35 @@ async def get_status() -> dict[str, Any]:
 
 
 @router.delete("/clear")
-async def clear_knowledge_graph() -> dict[str, Any]:
+async def clear_knowledge_graph(working_dir: str | None = None) -> dict[str, Any]:
     """
-    Deletes LightRAG working_dir and resets the in-memory instance.
+    Deletes a LightRAG working_dir and resets in-memory instances.
+
+    - If working_dir is provided: deletes THAT folder and evicts its instance (per-doc).
+    - Otherwise: deletes default working_dir and resets default instance.
     """
     try:
-        rag = await _get_lightrag()
-        working_dir = Path(rag.working_dir)
+        import shutil
 
-        if working_dir.exists():
-            import shutil
-            shutil.rmtree(working_dir)
+        if working_dir:
+            wd = Path(working_dir).resolve()
+            if wd.exists():
+                shutil.rmtree(wd)
+
+            key = str(wd)
+            if key in _lightrag_instances_by_dir:
+                del _lightrag_instances_by_dir[key]
+
+            return {"ok": True, "message": f"Per-doc working_dir cleared: {str(wd)}"}
+
+        rag = await _get_lightrag_default()
+        wd = Path(rag.working_dir).resolve()
+        if wd.exists():
+            shutil.rmtree(wd)
 
         global _lightrag_instance
         _lightrag_instance = None
 
-        return {"ok": True, "message": "LightRAG working_dir cleared and instance reset."}
+        return {"ok": True, "message": "Default LightRAG working_dir cleared and instance reset."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error clearing knowledge graph: {str(e)}")
