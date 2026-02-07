@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lunar Reader UI</title>
+</head>
+<body style="margin:0;">
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+
+  <script type="module">
+    import Dashboard from "/ui/dashboard.js";
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(React.createElement(Dashboard));
+  </script>
+</body>
+</html>
