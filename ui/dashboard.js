@@ -10,6 +10,7 @@ import DigestDebugCard from "./components/cards/DigestDebugCard.js";
 import SupabaseUploadCard from "./components/cards/SupabaseUploadCard.js";
 import SupabaseDocsCard from "./components/cards/SupabaseDocsCard.js";
 import GrokChatCard from "./components/cards/GrokChatCard.js";
+import LongWriteCard from "./components/cards/LongWriteCard.js";
 
 const { useMemo, useState } = React;
 
@@ -48,7 +49,9 @@ export default function Dashboard() {
 
         React.createElement(SupabaseDocsCard, { apiBase }),
 
-        React.createElement(GrokChatCard, { apiBase })
+        React.createElement(GrokChatCard, { apiBase }),
+
+        React.createElement(LongWriteCard, { apiBase })
       )
     )
   );
