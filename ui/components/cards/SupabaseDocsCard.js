@@ -9,7 +9,11 @@ import DocSelect from "../widgets/DocSelect.js";
 
 import useAsyncAction from "../hooks/useAsyncAction.js";
 import useLocalStorageState from "../hooks/useLocalStorageState.js";
-import { LS_KEY_ACTIVE_DOC } from "../constants.js";
+import {
+  LS_KEY_ACTIVE_DOC,
+  LS_KEY_RETRIEVAL_TOPK,
+  LS_KEY_RETRIEVAL_MINSIM,
+} from "../constants.js";
 import { fetchJsonOrThrow } from "../api.js";
 
 import { NumberInput, TextInput, FieldRow, Label } from "../ui/Field.js";
@@ -22,12 +26,17 @@ export default function SupabaseDocsCard({ apiBase }) {
   const [activeDocId, setActiveDocId] = useLocalStorageState(LS_KEY_ACTIVE_DOC, "");
   const [activeDoc, setActiveDoc] = useState(null);
 
-  const [topK, setTopK] = useState(8);
-  const [minSim, setMinSim] = useState("");
+  // ✅ persisted retrieval params so Chat can use the same values
+  const [topK, setTopK] = useLocalStorageState(LS_KEY_RETRIEVAL_TOPK, 8);
+  const [minSim, setMinSim] = useLocalStorageState(LS_KEY_RETRIEVAL_MINSIM, "");
+
   const [lastRetrieveJson, setLastRetrieveJson] = useState("");
 
   const refresh = useAsyncAction(async () => {
-    const parsed = await fetchJsonOrThrow(`${apiBase}/supabase/documents?limit=500`, { method: "GET", headers: { Accept: "application/json" } });
+    const parsed = await fetchJsonOrThrow(`${apiBase}/supabase/documents?limit=500`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
     const list = parsed?.documents || [];
     setDocs(Array.isArray(list) ? list : []);
     if (!activeDocId && list.length) setActiveDocId(list[0].doc_id);
@@ -39,7 +48,10 @@ export default function SupabaseDocsCard({ apiBase }) {
       setActiveDoc(null);
       return null;
     }
-    const parsed = await fetchJsonOrThrow(`${apiBase}/supabase/documents/${encodeURIComponent(docId)}`, { method: "GET", headers: { Accept: "application/json" } });
+    const parsed = await fetchJsonOrThrow(`${apiBase}/supabase/documents/${encodeURIComponent(docId)}`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
     setActiveDoc(parsed?.document || null);
     return parsed?.document || null;
   });
@@ -75,6 +87,7 @@ export default function SupabaseDocsCard({ apiBase }) {
       setLastRetrieveJson(JSON.stringify({ error: "No active document selected." }, null, 2));
       return;
     }
+
     const payload = { doc_id: activeDocId, query: "What is this document about?", top_k: Number(topK || 8) };
     const sim = String(minSim || "").trim();
     if (sim) payload.min_similarity = Number(sim);
@@ -116,8 +129,19 @@ export default function SupabaseDocsCard({ apiBase }) {
       React.createElement(
         FieldRow,
         null,
-        React.createElement(NumberInput, { value: topK, onChange: (v) => setTopK(Number(v || 0)), width: 120, title: "top_k" }),
-        React.createElement(TextInput, { value: minSim, onChange: setMinSim, width: 160, placeholder: "min_similarity (optional)", title: "min_similarity" }),
+        React.createElement(NumberInput, {
+          value: topK,
+          onChange: (v) => setTopK(Number(v || 0)),
+          width: 120,
+          title: "top_k",
+        }),
+        React.createElement(TextInput, {
+          value: minSim,
+          onChange: setMinSim,
+          width: 160,
+          placeholder: "min_similarity (optional)",
+          title: "min_similarity",
+        }),
         React.createElement(Button, { onClick: () => retrieveExample().catch(() => {}), disabled: !activeDocId }, "Run Retrieval")
       )
     ),

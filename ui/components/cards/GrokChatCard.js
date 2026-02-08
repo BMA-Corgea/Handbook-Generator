@@ -2,38 +2,56 @@
 import Card from "../ui/Card.js";
 import Badge from "../ui/Badge.js";
 import Notice from "../ui/Notice.js";
+import Code from "../ui/Code.js";
 
 import ChatLog from "../widgets/ChatLog.js";
 import ChatComposer from "../widgets/ChatComposer.js";
 
 import useLocalStorageState from "../hooks/useLocalStorageState.js";
-import { LS_KEY_ACTIVE_DOC, LS_KEY_CHAT_MESSAGES } from "../constants.js";
+import {
+  LS_KEY_ACTIVE_DOC,
+  LS_KEY_CHAT_MESSAGES,
+  LS_KEY_RETRIEVAL_TOPK,
+  LS_KEY_RETRIEVAL_MINSIM,
+} from "../constants.js";
 import { fetchJsonOrThrow } from "../api.js";
 
 const { useEffect, useRef, useState } = React;
 
-function buildContextFromChunks(chunks) {
-  const arr = Array.isArray(chunks) ? chunks : [];
-  return arr
-    .map((c, i) => {
-      const meta = c?.metadata || {};
-      const page = meta?.page ?? c?.page ?? null;
-      const cid = c?.chunk_id ? String(c.chunk_id) : `chunk_${i + 1}`;
-      const header = page ? `[p${page} #${cid}]` : `[#${cid}]`;
-      const content = c?.content ? String(c.content) : "";
-      return `${header}\n${content}`;
-    })
-    .join("\n\n---\n\n");
+function summarizeVerdict(v) {
+  const s = String(v || "").toLowerCase();
+  if (s === "relevant") return "relevant";
+  if (s === "partially_relevant") return "partially relevant";
+  return "not relevant";
+}
+
+function safeJsonParse(raw, fallback) {
+  if (raw === null || raw === undefined) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
 }
 
 export default function GrokChatCard({ apiBase }) {
+  // Hook values (already parsed by your hook)
   const [activeDocId] = useLocalStorageState(LS_KEY_ACTIVE_DOC, "");
+  const [topK] = useLocalStorageState(LS_KEY_RETRIEVAL_TOPK, 8);
+  const [minSim] = useLocalStorageState(LS_KEY_RETRIEVAL_MINSIM, "");
+
+  // Live values (kept in sync across cards without refresh)
+  const [activeDocIdLive, setActiveDocIdLive] = useState(String(activeDocId || ""));
+  const [topKLive, setTopKLive] = useState(Number(topK || 8));
+  const [minSimLive, setMinSimLive] = useState(String(minSim || ""));
+
   const [messages, setMessages] = useLocalStorageState(LS_KEY_CHAT_MESSAGES, [
     {
       id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now()),
       role: "system",
       text:
-        "Chat scaffold ready. Select a document in the Supabase card, then ask questions. Retrieved chunks (RAG) are fetched from Supabase and can be fed to Grok.",
+        "Chat scaffold ready. Select a document in the Supabase card, then ask questions. " +
+        "This chat calls /grok/rag-chat (server performs retrieval + guardrails).",
       ts: Date.now(),
     },
   ]);
@@ -52,59 +70,149 @@ export default function GrokChatCard({ apiBase }) {
   function push(role, text) {
     const id = crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random()}`;
     setMessages((prev) => prev.concat([{ id, role, text, ts: Date.now() }]));
+    return id;
   }
 
-  async function retrieveForQuery(queryText) {
-    if (!activeDocId) throw new Error("No active document selected. Pick a document in the Supabase card first.");
-    const payload = { doc_id: activeDocId, query: queryText, top_k: 8 };
-    return await fetchJsonOrThrow(`${apiBase}/supabase/retrieve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify(payload),
-    });
+  function replaceMessage(id, patch) {
+    if (!id) return;
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== id) return m;
+        return { ...m, ...patch, ts: Date.now() };
+      })
+    );
+  }
+
+  // Keep live state synced with hook state (if hook triggers re-render)
+  useEffect(() => setActiveDocIdLive(String(activeDocId || "")), [activeDocId]);
+  useEffect(() => setTopKLive(Number(topK || 8)), [topK]);
+  useEffect(() => setMinSimLive(String(minSim || "")), [minSim]);
+
+  // Also subscribe to events and read *parsed* values from localStorage for same-tab updates
+  useEffect(() => {
+    function readAllFromStorage() {
+      try {
+        const rawDoc = localStorage.getItem(LS_KEY_ACTIVE_DOC);
+        const rawTopK = localStorage.getItem(LS_KEY_RETRIEVAL_TOPK);
+        const rawMin = localStorage.getItem(LS_KEY_RETRIEVAL_MINSIM);
+
+        const docParsed = safeJsonParse(rawDoc, "");
+        const topParsed = safeJsonParse(rawTopK, 8);
+        const minParsed = safeJsonParse(rawMin, "");
+
+        setActiveDocIdLive(String(docParsed || ""));
+        const nk = Number(topParsed);
+        setTopKLive(Number.isFinite(nk) ? nk : 8);
+        setMinSimLive(String(minParsed || ""));
+      } catch {
+        // ignore
+      }
+    }
+
+    function onStorageEvent(e) {
+      // Native storage event: e.newValue is raw string (JSON), so parse it.
+      if (e && e.type === "storage") {
+        if (e.key === LS_KEY_ACTIVE_DOC) {
+          const v = safeJsonParse(e.newValue, "");
+          setActiveDocIdLive(String(v || ""));
+        }
+        if (e.key === LS_KEY_RETRIEVAL_TOPK) {
+          const v = safeJsonParse(e.newValue, 8);
+          const nk = Number(v);
+          setTopKLive(Number.isFinite(nk) ? nk : 8);
+        }
+        if (e.key === LS_KEY_RETRIEVAL_MINSIM) {
+          const v = safeJsonParse(e.newValue, "");
+          setMinSimLive(String(v || ""));
+        }
+        return;
+      }
+
+      // Custom event (same-tab): just re-read all
+      readAllFromStorage();
+    }
+
+    window.addEventListener("storage", onStorageEvent);
+    window.addEventListener("lunar:ls", onStorageEvent);
+    return () => {
+      window.removeEventListener("storage", onStorageEvent);
+      window.removeEventListener("lunar:ls", onStorageEvent);
+    };
+  }, []);
+
+  // Breadcrumb when doc changes
+  const lastDocRef = useRef(activeDocIdLive);
+  useEffect(() => {
+    const prev = String(lastDocRef.current || "");
+    const next = String(activeDocIdLive || "");
+    if (prev !== next) {
+      lastDocRef.current = next;
+      if (next) push("system", `Active document changed → doc_id="${next}"`);
+    }
+  }, [activeDocIdLive]);
+
+  function renderParamsLine() {
+    const sim = String(minSimLive || "").trim();
+    return React.createElement(
+      "div",
+      { style: { marginTop: 8, fontSize: 12, opacity: 0.85 } },
+      "Using retrieval params from Supabase card: ",
+      React.createElement(Code, null, `top_k=${Number(topKLive || 8)}`),
+      " ",
+      sim ? React.createElement(Code, null, `min_similarity=${sim}`) : React.createElement(Code, null, "min_similarity=∅"),
+      " ",
+      activeDocIdLive ? React.createElement(Code, null, `doc_id=${activeDocIdLive.slice(0, 12)}…`) : null
+    );
   }
 
   async function send() {
     const text = String(chatInput || "").trim();
     if (!text || sending) return;
 
+    if (!activeDocIdLive) {
+      const msg = "No active document selected. Pick a document in the Supabase card first.";
+      setChatErr(msg);
+      push("assistant", `Error: ${msg}`);
+      return;
+    }
+
     setChatErr("");
     setSending(true);
     setChatInput("");
     push("user", text);
 
+    const thinkingId = push("system", "Thinking… (retrieving + asking Grok)");
+
     try {
-      const retrieval = await retrieveForQuery(text);
-      const chunks = retrieval?.chunks || [];
-      const context = buildContextFromChunks(chunks);
+      const payload = {
+        question: text,
+        doc_id: activeDocIdLive, // ✅ now guaranteed unquoted
+        top_k: Number(topKLive || 8),
+      };
+      const sim = String(minSimLive || "").trim();
+      if (sim) payload.min_similarity = Number(sim);
 
-      if (!chunks.length) push("system", "No chunks returned from retrieval. Grok may not be able to answer from the document.");
-      else push("system", `Retrieved ${chunks.length} chunks for doc_id=${String(activeDocId).slice(0, 8)}…`);
+      const res = await fetchJsonOrThrow(`${apiBase}/grok/rag-chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(payload),
+      });
 
-      let replyText = null;
+      const verdict = summarizeVerdict(res?.verdict);
+      const used = Array.isArray(res?.used_chunks) ? res.used_chunks : [];
+      const model = res?.model || "grok";
 
-      try {
-        const grokPayload = { doc_id: activeDocId, query: text, context, chunks };
-        const grokParsed = await fetchJsonOrThrow(`${apiBase}/grok/chat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify(grokPayload),
-        });
+      replaceMessage(thinkingId, {
+        role: "system",
+        text: `RAG verdict: ${verdict}. Used ${used.length} chunk(s). Model=${model}.`,
+      });
 
-        replyText = grokParsed?.response ?? grokParsed?.answer ?? grokParsed?.text ?? "(No response field from /grok/chat)";
-      } catch (e) {
-        const fallback = await fetchJsonOrThrow(`${apiBase}/grok/test_grok`, { method: "GET", headers: { Accept: "application/json" } });
-        const fallbackReply = fallback?.response ?? "(No response field)";
-        replyText =
-          `NOTE: /grok/chat not available (or errored). Showing /grok/test_grok instead.\n\n` +
-          `Retrieved context length: ${context.length} chars.\n\n` +
-          fallbackReply;
-      }
-
-      push("assistant", replyText || "(Empty reply)");
+      const answer = res?.answer || "(Empty answer)";
+      push("assistant", answer);
     } catch (e) {
       const msg = e?.message || String(e);
       setChatErr(msg);
+      replaceMessage(thinkingId, { role: "system", text: `Error during Grok call: ${msg}` });
       push("assistant", `Error: ${msg}`);
     } finally {
       setSending(false);
@@ -116,9 +224,11 @@ export default function GrokChatCard({ apiBase }) {
     null,
     React.createElement(Card.Header, {
       title: "Chat (Supabase RAG → Grok)",
-      subtitle: "Retrieves chunks from Supabase, builds context, then calls /grok/chat (fallback /grok/test_grok).",
+      subtitle: "Calls /grok/rag-chat (server performs retrieval + guardrails).",
       right: React.createElement(Badge, null, "chat"),
     }),
+
+    renderParamsLine(),
 
     chatErr ? React.createElement(Notice, { variant: "error", title: "Chat Error" }, chatErr) : null,
 

@@ -264,13 +264,19 @@ def test_lightrag_status(client, mock_fs, mock_lightrag):
     wd = mock_fs["rag"] / "my-resume"
     wd.mkdir()
     (wd / "vdb_chunks.json").touch()
-    
+
     response = client.get(f"/lightrag/status?working_dir={str(wd)}")
     assert response.status_code == 200
     data = response.json()
-    assert data["files"]["vdb_chunks.json"] is True
-    assert data["files"]["kv_store_full_docs.json"] is False
 
+    # New LightRAG /status contract: minimal shape
+    assert data["exists"] is True
+    assert Path(data["path"]).resolve() == wd.resolve()
+
+    # If you still want "vdb_chunks exists" coverage, test the filesystem directly
+    assert (wd / "vdb_chunks.json").exists() is True
+    assert (wd / "kv_store_full_docs.json").exists() is False
+    
 # -----------------------------------------------------------------------------
 # 7. TESTS: Supabase Router (Sync & Retrieval)
 # -----------------------------------------------------------------------------
