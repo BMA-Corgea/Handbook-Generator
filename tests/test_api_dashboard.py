@@ -388,3 +388,215 @@ def test_supabase_get_document(client, mock_supabase):
 def test_supabase_get_document_404(client, mock_supabase):
     response = client.get("/supabase/documents/non_existent")
     assert response.status_code == 404
+
+# -----------------------------------------------------------------------------
+# 8. TESTS: Longwrite Router (Handbook Generation)
+# -----------------------------------------------------------------------------
+
+@pytest.fixture
+def mock_grok_longwrite(monkeypatch):
+    """Mock Grok client for longwrite tests."""
+    async def fake_chat_text(messages, temperature=0.0, max_tokens=1600):
+        # Return different responses based on system prompt
+        sys_content = messages[0].get("content", "") if messages else ""
+        
+        if "outline" in sys_content.lower():
+            return (
+                "Section 1: Introduction (~800 words)\n"
+                "Section 2: Core Concepts (~850 words)\n"
+                "Section 3: Practical Applications (~900 words)\n"
+            )
+        else:
+            # Writing section content
+            return "This is mocked section content. " * 50  # ~350 words
+    
+    fake_client = FakeGrokClient()
+    fake_client.chat_text = fake_chat_text
+    
+    import server.routers.longwrite_router as longwrite_mod
+    monkeypatch.setattr(longwrite_mod, "GrokClient", lambda: fake_client)
+    return fake_client
+
+@pytest.fixture
+def mock_longwrite_retrieval(monkeypatch):
+    """Mock the retrieval calls in longwrite router."""
+    import server.routers.longwrite_router as longwrite_mod
+    
+    async def fake_retrieve_single(doc_id, query, top_k, min_similarity):
+        return {
+            "chunks": [
+                {
+                    "chunk_id": f"ch_{i}",
+                    "doc_id": doc_id,
+                    "title": "Test Document",
+                    "content": f"Mock content for query: {query[:30]}",
+                    "similarity": 0.85,
+                    "chunk_order_index": i,
+                    "file_path": "test.pdf"
+                }
+                for i in range(min(top_k, 5))
+            ]
+        }
+    
+    async def fake_retrieve_multi(doc_ids, query, top_k, min_similarity):
+        all_chunks = []
+        for doc_id in doc_ids[:2]:  # Limit to 2 docs for testing
+            result = await fake_retrieve_single(doc_id, query, top_k // len(doc_ids), min_similarity)
+            all_chunks.extend(result["chunks"])
+        return {"chunks": all_chunks}
+    
+    monkeypatch.setattr(longwrite_mod, "_retrieve_single", fake_retrieve_single)
+    monkeypatch.setattr(longwrite_mod, "_retrieve_multi", fake_retrieve_multi)
+
+def test_longwrite_ping(client):
+    """Test the longwrite router ping endpoint."""
+    response = client.get("/longwrite/ping")
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert response.json()["service"] == "longwrite_router"
+
+def test_longwrite_handbook_missing_doc_scope(client):
+    """Test that handbook endpoint requires doc_id or doc_ids."""
+    payload = {
+        "handbook_request": "Create a handbook"
+    }
+    response = client.post("/longwrite/handbook", json=payload)
+    assert response.status_code == 400
+    assert "doc_id or doc_ids" in response.json()["detail"]
+
+def test_longwrite_handbook_both_doc_scopes(client):
+    """Test that handbook endpoint rejects both doc_id and doc_ids."""
+    payload = {
+        "doc_id": "doc1",
+        "doc_ids": ["doc2", "doc3"],
+        "handbook_request": "Create a handbook"
+    }
+    response = client.post("/longwrite/handbook", json=payload)
+    assert response.status_code == 400
+    assert "not both" in response.json()["detail"]
+
+def test_longwrite_handbook_single_doc_success(client, mock_grok_longwrite, mock_longwrite_retrieval):
+    """Test successful handbook generation for a single document."""
+    payload = {
+        "doc_id": "test-doc-1",
+        "handbook_request": "Create a comprehensive handbook about this document",
+        "target_words": 2000,
+        "min_section_words": 300,
+        "max_section_words": 600,
+        "max_sections": 3,
+        "temperature": 0.2,
+        "max_tokens": 800,
+        "retrieve_top_k": 10
+    }
+    
+    response = client.post("/longwrite/handbook", json=payload)
+    assert response.status_code == 200
+    
+    data = response.json()
+    assert data["ok"] is True
+    assert data["model"] == "grok-fake"
+    assert "Section 1" in data["outline"]
+    assert "Section 2" in data["outline"]
+    assert len(data["text"]) > 0
+    assert len(data["used_chunks"]) > 0
+    
+    # Check diagnostics
+    diag = data["diagnostics"]
+    assert diag["sections_planned"] == 3
+    assert diag["sections_written"] > 0
+    assert diag["unbounded_context"] is True
+
+def test_longwrite_handbook_multi_doc_success(client, mock_grok_longwrite, mock_longwrite_retrieval):
+    """Test successful handbook generation for multiple documents."""
+    payload = {
+        "doc_ids": ["doc1", "doc2"],
+        "handbook_request": "Create a handbook combining insights from these documents",
+        "target_words": 1500,
+        "min_section_words": 300,
+        "max_section_words": 600,
+        "max_sections": 3
+    }
+    
+    response = client.post("/longwrite/handbook", json=payload)
+    assert response.status_code == 200
+    
+    data = response.json()
+    assert data["ok"] is True
+    assert len(data["used_chunks"]) > 0
+    assert data["diagnostics"]["retrieved_chunks"] > 0
+
+def test_longwrite_handbook_empty_retrieval(client, mock_grok_longwrite, monkeypatch):
+    """Test handbook generation when retrieval returns no chunks."""
+    import server.routers.longwrite_router as longwrite_mod
+    
+    async def fake_empty_retrieve(*args, **kwargs):
+        return {"chunks": []}
+    
+    monkeypatch.setattr(longwrite_mod, "_retrieve_single", fake_empty_retrieve)
+    
+    payload = {
+        "doc_id": "empty-doc",
+        "handbook_request": "Create a handbook"
+    }
+    
+    response = client.post("/longwrite/handbook", json=payload)
+    assert response.status_code == 200
+    
+    data = response.json()
+    assert data["ok"] is True
+    assert "No outline" in data["outline"]
+    assert "no relevant content" in data["text"]
+    assert len(data["used_chunks"]) == 0
+    assert data["diagnostics"]["retrieved_chunks"] == 0
+
+def test_longwrite_handbook_respects_target_words(client, mock_grok_longwrite, mock_longwrite_retrieval):
+    """Test that handbook generation respects target word count."""
+    payload = {
+        "doc_id": "test-doc",
+        "handbook_request": "Create a short handbook",
+        "target_words": 1200,  # Minimum is 1000, so use 1200 for a low target
+        "min_section_words": 200,
+        "max_section_words": 400,
+        "max_sections": 10
+    }
+    
+    response = client.post("/longwrite/handbook", json=payload)
+    assert response.status_code == 200
+    
+    data = response.json()
+    diag = data["diagnostics"]
+    
+    # Either: stops early due to word count, OR generates content
+    # Our mock generates ~350 words per section, so it may complete all planned sections
+    # The key is that it respects the target_words parameter
+    assert diag["final_word_count"] > 0
+    assert diag["target_words"] == 1200
+    
+    # Verify it doesn't wildly exceed the target (allow some overshoot)
+    assert diag["final_word_count"] <= diag["target_words"] * 1.5
+
+def test_longwrite_handbook_custom_parameters(client, mock_grok_longwrite, mock_longwrite_retrieval):
+    """Test handbook generation with custom parameters."""
+    payload = {
+        "doc_id": "test-doc",
+        "handbook_request": "Create a detailed technical handbook",
+        "target_words": 5000,
+        "min_section_words": 400,
+        "max_section_words": 1000,
+        "max_sections": 20,
+        "temperature": 0.7,
+        "max_tokens": 2000,
+        "retrieve_top_k": 50,
+        "min_similarity": 0.7
+    }
+    
+    response = client.post("/longwrite/handbook", json=payload)
+    assert response.status_code == 200
+    
+    data = response.json()
+    assert data["ok"] is True
+    
+    diag = data["diagnostics"]
+    assert diag["target_words"] == 5000
+    assert diag["max_tokens"] == 2000
+    assert diag["temperature"] == 0.7
