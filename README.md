@@ -115,7 +115,7 @@ See `WHAT_EACH_FILE_DOES.md` for detailed router-level documentation.
 
 ### Python environment
 
-Recommended Python version: **3.12**
+Recommended Python version: **3.12** (3.13 still works)
 
 ```bash
 python -m venv .venv
