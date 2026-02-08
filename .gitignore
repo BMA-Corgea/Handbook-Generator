@@ -23,7 +23,10 @@ Thumbs.db
 # Streamlit cache
 .streamlit/
 
-# Outputs
+# Ignore all LightRAG outputs
 lightrag_cache/*
+
+# …but keep the README
+!lightrag_cache/README.md
 
 *.pdf

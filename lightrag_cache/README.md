@@ -1,0 +1,1 @@
+This directory is for holding the cached outputs of PDFs
