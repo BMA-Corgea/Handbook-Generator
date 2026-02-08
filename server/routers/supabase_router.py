@@ -310,34 +310,39 @@ def sync_lightrag_artifacts_to_supabase(
     # Useful fallback for title/file_path when LightRAG didn't store them
     wd_fallback = wd.name  # doc_key folder name
 
+    def _ns_doc_id(raw_doc_id: str) -> str:
+        return f"{wd_fallback}::{raw_doc_id}"
+
+    def _ns_chunk_id(raw_chunk_id: str) -> str:
+        return f"{wd_fallback}::{raw_chunk_id}"
+
     # Documents upsert payload
     doc_rows: list[dict[str, Any]] = []
     for doc_id, rec in docs_kv.items():
-        title = _derive_title(doc_id, rec, fallback=wd_fallback)
+        # IMPORTANT: namespace doc_id so different ingests can't collide
+        sb_doc_id = _ns_doc_id(str(doc_id))
 
-        # Ensure metadata is a dict, and inject useful provenance (non-destructive)
+        title = _derive_title(str(doc_id), rec, fallback=wd_fallback)
+
         md = rec.get("metadata")
         if not isinstance(md, dict):
             md = {}
-        # Ensure we don't carry over "unknown_source" strings in the merge
+
         md = {
             **md,
             "doc_key": wd_fallback,
             "lightrag": True,
+            "lightrag_doc_id": str(doc_id),      # keep original
             "create_time": rec.get("create_time"),
             "update_time": rec.get("update_time"),
         }
-        
-        # Overwrite problematic fields explicitly
-        md["title"] = title 
-        md["source"] = title # This ensures 'source' in JSON matches the title column
 
         file_path = _derive_file_path(rec, fallback=wd_fallback)
 
         doc_rows.append(
             {
-                "doc_id": doc_id,
-                "title": title,  # ✅ expects documents.title column in your SQL
+                "doc_id": sb_doc_id,  # ✅ namespaced
+                "title": title,
                 "file_path": file_path,
                 "content": rec.get("content") if store_doc_text else None,
                 "created_at": rec.get("created_at") or _epoch_to_iso(rec.get("create_time")),
@@ -356,23 +361,32 @@ def sync_lightrag_artifacts_to_supabase(
             missing_embeddings += 1
             continue
 
+        raw_full_doc_id = rec.get("full_doc_id")
+        if not raw_full_doc_id:
+            # skip chunks without a doc ref
+            continue
+
+        sb_chunk_id = _ns_chunk_id(str(chunk_id))
+        sb_full_doc_id = _ns_doc_id(str(raw_full_doc_id))
+
         md = rec.get("metadata")
         if not isinstance(md, dict):
             md = {}
+
         md = {
-            **{
-                "create_time": rec.get("create_time"),
-                "update_time": rec.get("update_time"),
-                "lightrag": True,
-                "doc_key": wd_fallback,
-            },
             **md,
+            "doc_key": wd_fallback,
+            "lightrag": True,
+            "lightrag_chunk_id": str(chunk_id),         # keep original
+            "lightrag_full_doc_id": str(raw_full_doc_id),
+            "create_time": rec.get("create_time"),
+            "update_time": rec.get("update_time"),
         }
 
         chunk_rows.append(
             {
-                "chunk_id": chunk_id,
-                "doc_id": rec.get("full_doc_id"),
+                "chunk_id": sb_chunk_id,     # ✅ namespaced
+                "doc_id": sb_full_doc_id,    # ✅ namespaced, matches documents.doc_id
                 "chunk_order_index": rec.get("chunk_order_index"),
                 "file_path": rec.get("file_path") or md.get("source") or wd_fallback,
                 "content": rec.get("content") or "",
@@ -383,7 +397,6 @@ def sync_lightrag_artifacts_to_supabase(
                 "updated_at": rec.get("updated_at") or _epoch_to_iso(rec.get("update_time")),
             }
         )
-
     sb = _get_supabase_client()
 
     # Upsert documents first (FK)
