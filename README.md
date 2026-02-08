@@ -1,7 +1,7 @@
-# LunarTech Handbook Generator  
+# Handbook Generator  
 **FastAPI · React · Supabase · LightRAG · Grok**
 
-This repository implements an end-to-end **AI handbook generation system** built to satisfy the LunarTech AI Engineering Assignment. The system supports PDF upload, knowledge ingestion, grounded chat, and long-form handbook generation (20,000+ words) using a modern RAG architecture.
+This repository implements an end-to-end **AI handbook generation system** built to satisfy an AI Engineering Assignment. The system supports PDF upload, knowledge ingestion, grounded chat, and long-form handbook generation (20,000+ words) using a modern RAG architecture.
 
 At a high level:
 
@@ -206,12 +206,6 @@ Supabase service keys and LLM credentials never touch the frontend. The React UI
 ### Fail-closed RAG behavior
 
 If retrieval confidence is low, chat endpoints refuse to answer rather than hallucinate.
-
----
-
-## Confidentiality
-
-This repository was produced for an evaluation assignment. Assignment materials and proprietary prompts should not be redistributed outside the intended review context.
 
 ---
 

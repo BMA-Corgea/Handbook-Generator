@@ -14,7 +14,7 @@ from server.routers.longwrite_router import router as longwrite_router
 
 load_dotenv()
 
-app = FastAPI(title="LunarTech Assignment API", version="0.1.0")
+app = FastAPI(title="Handbook Generator API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,

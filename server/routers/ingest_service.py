@@ -99,7 +99,7 @@ async def _grok_chat_once(user_text: str) -> dict[str, Any]:
 # -----------------------------
 @router.get("/", include_in_schema=False)
 def root():
-    return {"message": "LunarTech Assignment API", "docs": "/docs"}
+    return {"message": "Handbook Generator API", "docs": "/docs"}
 
 
 @router.get("/pdf-stats")
