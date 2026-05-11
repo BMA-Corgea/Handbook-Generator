@@ -14,12 +14,20 @@ Environment variables:
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
+import warnings
 from pathlib import Path
 
-_INFERENCE_TIMEOUT = int(os.environ.get("HANDBOOK_INFERENCE_TIMEOUT_SECONDS", "120"))
+_raw_timeout = os.environ.get("HANDBOOK_INFERENCE_TIMEOUT_SECONDS", "120")
+try:
+    _INFERENCE_TIMEOUT = int(_raw_timeout)
+except ValueError:
+    raise ValueError(
+        f"HANDBOOK_INFERENCE_TIMEOUT_SECONDS must be an integer, got {_raw_timeout!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +62,7 @@ def _resolve_bin(name: str, env_var: str) -> str | None:
 
     try:
         out = subprocess.check_output(
-            ["bash", "-lc", f"which {name}"],
+            ["bash", "-lc", f"which {shlex.quote(name)}"],
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
@@ -163,7 +171,14 @@ _PROVIDER_CLASSES: dict[str, type] = {
 
 def _provider_order() -> list[str]:
     raw = os.environ.get("HANDBOOK_LLM_PROVIDERS", "claude,codex")
-    return [p.strip() for p in raw.split(",") if p.strip() in _PROVIDER_CLASSES]
+    names = [p.strip() for p in raw.split(",") if p.strip()]
+    unknown = [p for p in names if p not in _PROVIDER_CLASSES]
+    if unknown:
+        warnings.warn(
+            f"Unknown LLM provider(s) in HANDBOOK_LLM_PROVIDERS will be ignored: {unknown}",
+            stacklevel=2,
+        )
+    return [p for p in names if p in _PROVIDER_CLASSES]
 
 
 def infer(prompt: str) -> str:
@@ -186,6 +201,9 @@ def infer(prompt: str) -> str:
             return _PROVIDER_CLASSES[name]().infer(prompt)
         except (ProviderError, subprocess.TimeoutExpired) as exc:
             last_err = exc
+            continue
+        except OSError as exc:
+            last_err = ProviderError(f"{name} binary unavailable: {exc}")
             continue
 
     raise RuntimeError(f"All inference providers failed. Last: {last_err}")
