@@ -9,9 +9,39 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from server.clients.grok_client import GrokClient
+from server.llm_router import _provider_order, _resolve_bin, infer
 
 router = APIRouter(prefix="/grok", tags=["grok"])
+
+
+# -----------------------------
+# LLM helpers
+# -----------------------------
+def _active_providers() -> list[str]:
+    """Return providers from HANDBOOK_LLM_PROVIDERS whose binaries resolve."""
+    result = []
+    for name in _provider_order():
+        env_var = f"HANDBOOK_{name.upper()}_BIN"
+        try:
+            if _resolve_bin(name, env_var) is not None:
+                result.append(name)
+        except Exception:
+            pass
+    return result
+
+
+def _active_provider_label() -> str:
+    active = _active_providers()
+    return active[0] if active else "unknown"
+
+
+def _messages_to_prompt(messages: list[dict]) -> str:
+    parts = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        parts.append(f"[{role.upper()}]\n{content}")
+    return "\n\n".join(parts)
 
 
 # -----------------------------
@@ -286,16 +316,19 @@ def _has_any_citation(answer: str, chunk_ids: list[str]) -> bool:
 @router.get("/test_grok")
 async def test_grok():
     """
-    Smoke test endpoint. Calls Grok via GrokClient.
+    Smoke test endpoint. Calls LLM via infer().
     """
     try:
-        client = GrokClient()
-        text = await client.chat_text(
-            [{"role": "user", "content": "Say hello in exactly five words."}],
-            temperature=0.0,
-            max_tokens=50,
-        )
-        return {"ok": True, "model": client.model, "response": text}
+        active = _active_providers()
+        active_provider = active[0] if active else "unknown"
+        text = infer("Say hello in exactly five words.")
+        return {
+            "ok": True,
+            "model": active_provider,
+            "response": text,
+            "providers": active,
+            "active_provider": active_provider,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -342,11 +375,11 @@ async def rag_chat(req: RagChatRequest):
         "retrieved_count": len(chunks),
     }
 
-    # 2) If not relevant, do NOT call Grok (hard guardrail)
+    # 2) If not relevant, do NOT call LLM (hard guardrail)
     if verdict == "not_relevant":
         return RagChatResponse(
             ok=True,
-            model=GrokClient().model,
+            model=_active_provider_label(),
             verdict=verdict,
             answer=(
                 "I can’t answer that from the selected document(s). "
@@ -360,8 +393,8 @@ async def rag_chat(req: RagChatRequest):
     sources_block = _build_sources_block(chunks)
     chunk_ids = [c.chunk_id for c in chunks]
 
-    # 4) Call Grok with strict JSON request
-    client = GrokClient()
+    # 4) Call LLM with strict JSON request
+    active_label = _active_provider_label()
 
     user_msg = (
         "USER QUESTION:\n"
@@ -374,23 +407,21 @@ async def rag_chat(req: RagChatRequest):
     )
 
     try:
-        raw = await client.chat_text(
-            messages=[
+        raw = infer(
+            _messages_to_prompt([
                 {"role": "system", "content": _system_prompt()},
                 {"role": "user", "content": user_msg},
-            ],
-            temperature=req.temperature,
-            max_tokens=req.max_tokens,
+            ])
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Grok call failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"LLM call failed: {str(e)}")
 
     parsed = _extract_json_object(raw)
     if not parsed:
         # Fail closed: don’t let non-compliant output through
         return RagChatResponse(
             ok=True,
-            model=client.model,
+            model=active_label,
             verdict=verdict,
             answer=(
                 "I couldn’t produce a compliant, source-grounded answer. "
@@ -408,7 +439,7 @@ async def rag_chat(req: RagChatRequest):
     if verdict in ("relevant", "partially_relevant") and not _has_any_citation(answer, chunk_ids):
         return RagChatResponse(
             ok=True,
-            model=client.model,
+            model=active_label,
             verdict=verdict,
             answer=(
                 "I can’t answer that safely from the document context because the response "
@@ -428,7 +459,7 @@ async def rag_chat(req: RagChatRequest):
 
     return RagChatResponse(
         ok=True,
-        model=client.model,
+        model=active_label,
         verdict=final_verdict,
         answer=answer,
         used_chunks=chunks[: min(len(chunks), 8)],

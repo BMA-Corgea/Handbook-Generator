@@ -9,9 +9,32 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from server.clients.grok_client import GrokClient
+from server.llm_router import _provider_order, _resolve_bin, infer
 
 router = APIRouter(prefix="/longwrite", tags=["longwrite"])
+
+
+# -----------------------------
+# LLM helpers
+# -----------------------------
+def _active_provider_label() -> str:
+    for name in _provider_order():
+        env_var = f"HANDBOOK_{name.upper()}_BIN"
+        try:
+            if _resolve_bin(name, env_var) is not None:
+                return name
+        except Exception:
+            pass
+    return "unknown"
+
+
+def _messages_to_prompt(messages: list[dict]) -> str:
+    parts = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        parts.append(f"[{role.upper()}]\n{content}")
+    return "\n\n".join(parts)
 
 
 # -----------------------------
@@ -271,10 +294,12 @@ async def generate_handbook(req: HandbookRequest) -> HandbookResponse:
 
     # 1) Gather source chunks from Supabase
     chunks = await _gather_handbook_sources(req)
+    active_label = _active_provider_label()
+
     if not chunks:
         return HandbookResponse(
             ok=True,
-            model=GrokClient().model,
+            model=active_label,
             outline="(No outline: retrieval returned no usable chunks.)",
             text="I couldn’t generate a handbook because retrieval returned no relevant content for this document.",
             used_chunks=[],
@@ -284,15 +309,12 @@ async def generate_handbook(req: HandbookRequest) -> HandbookResponse:
     sources_block = _build_sources_block(chunks, max_chars=20000)
 
     # 2) Build outline (handbook structure derived from sources)
-    client = GrokClient()
     try:
-        outline = await client.chat_text(
-            messages=[
+        outline = infer(
+            _messages_to_prompt([
                 {"role": "system", "content": _outline_system_prompt()},
                 {"role": "user", "content": _outline_user_prompt(req, sources_block)},
-            ],
-            temperature=req.temperature,
-            max_tokens=min(req.max_tokens, 1800),
+            ])
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Outline call failed: {str(e)}")
@@ -313,13 +335,11 @@ async def generate_handbook(req: HandbookRequest) -> HandbookResponse:
         user_prompt = _write_user_prompt(req, outline, text, sec, sources_block)
 
         try:
-            part = await client.chat_text(
-                messages=[
+            part = infer(
+                _messages_to_prompt([
                     {"role": "system", "content": _write_system_prompt()},
                     {"role": "user", "content": user_prompt},
-                ],
-                temperature=req.temperature,
-                max_tokens=req.max_tokens,
+                ])
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Write failed at section {idx}: {str(e)}")
@@ -333,12 +353,12 @@ async def generate_handbook(req: HandbookRequest) -> HandbookResponse:
 
     return HandbookResponse(
         ok=True,
-        model=client.model,
+        model=active_label,
         outline=outline or "(No outline returned)",
         text=text or "(No handbook text returned)",
         used_chunks=chunks[:50],
         diagnostics={
-            "model": client.model,
+            "model": active_label,
             "retrieved_chunks": len(chunks),
             "sections_planned": len(sections),
             "sections_written": written,
