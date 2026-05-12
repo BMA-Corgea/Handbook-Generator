@@ -265,3 +265,34 @@ def test_infer_default_provider_order_is_claude_then_codex(monkeypatch):
 def test_grok_not_in_default_providers(monkeypatch):
     monkeypatch.delenv("HANDBOOK_LLM_PROVIDERS", raising=False)
     assert "grok" not in llm_router._provider_order()
+
+
+def test_infer_quota_exhaustion_on_claude_failsover_to_codex(monkeypatch):
+    """AC3: quota exhaustion stderr on claude triggers QuotaExhausted and failover to codex."""
+    monkeypatch.setenv("HANDBOOK_LLM_PROVIDERS", "claude,codex")
+    with patch.object(ClaudeCLIProvider, "infer", side_effect=QuotaExhausted("rate limit exceeded")), \
+         patch.object(CodexCLIProvider, "infer", return_value="codex fallback") as mock_codex:
+        result = infer("hello")
+    assert result == "codex fallback"
+    mock_codex.assert_called_once_with("hello")
+
+
+def test_infer_auth_failure_on_claude_failsover_to_codex(monkeypatch):
+    """AC4: auth failure stderr on claude triggers AuthFailure and failover to codex."""
+    monkeypatch.setenv("HANDBOOK_LLM_PROVIDERS", "claude,codex")
+    with patch.object(ClaudeCLIProvider, "infer", side_effect=AuthFailure("not logged in")), \
+         patch.object(CodexCLIProvider, "infer", return_value="codex fallback") as mock_codex:
+        result = infer("hello")
+    assert result == "codex fallback"
+    mock_codex.assert_called_once_with("hello")
+
+
+def test_infer_codex_only_provider_skips_claude(monkeypatch):
+    """AC6: HANDBOOK_LLM_PROVIDERS=codex causes claude to be skipped entirely."""
+    monkeypatch.setenv("HANDBOOK_LLM_PROVIDERS", "codex")
+    with patch.object(ClaudeCLIProvider, "infer") as mock_claude, \
+         patch.object(CodexCLIProvider, "infer", return_value="codex only") as mock_codex:
+        result = infer("hello")
+    assert result == "codex only"
+    mock_claude.assert_not_called()
+    mock_codex.assert_called_once_with("hello")
