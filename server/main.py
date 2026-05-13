@@ -37,6 +37,10 @@ UI_DIR = PROJECT_ROOT / "ui"
 # Serve UI assets at /ui/*
 app.mount("/ui", StaticFiles(directory=str(UI_DIR), html=True), name="ui")
 
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "handbook-generator"}
+
 # Make / load the UI
 @app.get("/", include_in_schema=False)
 def ui_root():
